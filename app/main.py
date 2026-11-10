@@ -302,7 +302,9 @@ THEME = gr.themes.Base(
     primary_hue=TU_GOLD,
     secondary_hue=TU_GOLD,
     neutral_hue=TU_INK,
-    font=[gr.themes.GoogleFont("Open Sans"), "ui-sans-serif", "system-ui", "sans-serif"],
+    # Inter carries noticeably more weight than Open Sans at the same size, which
+    # keeps the interface legible when a screenshot is scaled down for print.
+    font=[gr.themes.GoogleFont("Inter"), "Inter", "ui-sans-serif", "system-ui", "sans-serif"],
     font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "ui-monospace", "monospace"],
 )
 
@@ -341,6 +343,14 @@ CSS = """
 /* chat surface */
 #tu-chat { border-radius: 16px; }
 #tu-chat p, #tu-chat li { line-height: 1.62; }
+
+/* Heavier text so the interface stays readable when scaled into a printed page */
+.gradio-container { font-weight: 500; }
+#tu-chat p, #tu-chat li, #tu-chat td, #tu-chat th {
+  font-weight: 500;
+  font-size: 15.5px;
+}
+#tu-chat h1, #tu-chat h2, #tu-chat h3, #tu-chat strong { font-weight: 700; }
 """
 
 
