@@ -1,3 +1,14 @@
+# Local virtual environment (the 5GB bloat source) - never commit this.
 cis_env/
+.venv/
 __pycache__/
+*.py[cod]
+
+# Secrets
+.env
+
+# Generated research telemetry (data/telemetry.csv)
 *.csv
+
+# Tooling caches
+.pytest_cache/

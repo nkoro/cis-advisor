@@ -1,5 +1,10 @@
-gradio
-instructor
-openai
-pydantic
-httpx
+# Pinned to the versions the app was validated against (Python 3.10/3.11).
+# markitdown is only needed by app/ingest.py (catalog refresh), python-dotenv
+# only for local .env loading; both are imported defensively.
+gradio==6.31.0
+instructor==1.17.0
+openai==3.3.0
+pydantic==2.14.3
+httpx==0.28.1
+markitdown==0.1.9
+python-dotenv==1.2.4

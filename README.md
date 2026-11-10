@@ -7,3 +7,114 @@ sdk: gradio
 app_file: app/main.py
 pinned: false
 ---
+
+# CIS Degree Plan Advisor
+
+Drafts Towson University CIS degree completion plans from the official catalog
+text using the SiliconFlow API (Qwen2.5-72B) with Instructor for structured output.
+
+## How it works
+
+```
+Gradio UI  ->  generate_plan()  ->  Instructor + SiliconFlow (Qwen2.5-72B)
+                     |
+                     +--> data/<major>.md    (hard catalog routing)
+                     +--> data/telemetry.csv (latency research log)
+```
+
+`generate_plan()` performs *hard routing*: the selected major maps to exactly one
+markdown catalog file, which is injected into the system prompt as the only source
+of truth. There is no vector store and no retrieval step.
+
+## Quick start (local)
+
+```bash
+python -m venv cis_env
+source cis_env/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env      # then set SILICONFLOW_API_KEY
+set -a; source .env; set +a
+
+python app/main.py        # http://localhost:7860
+```
+
+Check API connectivity without starting the UI:
+
+```bash
+python test_api.py
+```
+
+## Docker
+
+```bash
+cp .env.example .env      # then set SILICONFLOW_API_KEY
+docker compose up --build
+```
+
+The image installs `requirements.txt`, copies `app/` and `data/`, and runs as a
+non-root user. `./data` is bind-mounted so telemetry survives rebuilds. No local
+GPU is required because inference happens at SiliconFlow.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SILICONFLOW_API_KEY` | *(required)* | SiliconFlow API key. Without it the UI reports a configuration error instead of calling the API. |
+| `SILICONFLOW_BASE_URL` | `https://api.siliconflow.com/v1` | API base URL. |
+| `SILICONFLOW_MODEL` | `Qwen/Qwen2.5-72B-Instruct` | Chat model used for planning. |
+| `SILICONFLOW_TIMEOUT` | `180` | Per-request timeout, seconds. |
+| `SILICONFLOW_INSECURE_TLS` | `0` | Set to `1` only if your network does TLS inspection with an untrusted CA. |
+| `ADVISOR_USERNAME` / `ADVISOR_PASSWORD` | *(unset)* | Gradio basic-auth login. **If unset the UI has no login.** |
+| `GRADIO_SERVER_NAME` / `GRADIO_SERVER_PORT` | `0.0.0.0` / `7860` | Gradio bind address. |
+
+## Repository layout
+
+```
+cis-advisor/
+├── app/
+│   ├── main.py     # Gradio UI, prompt, SiliconFlow routing, telemetry
+│   └── ingest.py   # rebuilds data/*.md from catalog.towson.edu (markitdown)
+├── data/           # catalog context, one markdown file per major
+├── tests/          # offline pytest suite (no API key needed)
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── requirements-dev.txt
+```
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+The suite stubs the model client, so it runs offline and never spends tokens.
+
+## Refreshing the catalog
+
+`app/ingest.py` re-downloads each program page from `catalog.towson.edu` and
+rewrites `data/*.md`. Run it from the repository root:
+
+```bash
+python app/ingest.py
+```
+
+## Security notes
+
+* The API key is read from the environment only. If a key was ever committed,
+  rotate it in the SiliconFlow console and purge it from git history
+  (`git filter-repo`); deleting it from `HEAD` is not enough, because the old
+  commits still contain it.
+* TLS verification is on by default. `SILICONFLOW_INSECURE_TLS=1` is an explicit
+  opt-out for campus SSL inspection, not the default.
+* SSNs and Luhn-valid card numbers are rejected in code before any API call, so
+  PII never leaves the process.
+
+## Deployment
+
+This README keeps its Hugging Face Space frontmatter (`sdk: gradio`,
+`app_file: app/main.py`), so the same commit can still be pushed to a Space. The
+Docker path above is the recommended local-first option and runs on any
+container host.
