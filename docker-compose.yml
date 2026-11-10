@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  llm-engine:
+    image: ollama/ollama:latest
+    container_name: advising-llm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  advisor-app:
+    build: .
+    container_name: advising-ui
+    ports:
+      - "7860:7860" 
+    environment:
+      - OLLAMA_HOST=http://llm-engine:11434
+    depends_on:
+      - llm-engine
+    volumes:
+      - ./data:/app/data 
+      - ./app:/app
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
