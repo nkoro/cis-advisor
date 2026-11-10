@@ -1,4 +1,4 @@
-"""CIS Degree Plan Advisor - a conversational academic advisor.
+"""TUAdvisor - a conversational academic advisor.
 
 Gradio chat UI backed by the SiliconFlow API, grounded in a local markdown copy
 of the Towson University catalog (``data/*.md``).
@@ -7,6 +7,7 @@ Configuration is environment driven -- see ``.env.example``.
 """
 
 import csv
+import html
 import os
 import re
 import time
@@ -240,8 +241,109 @@ def log_telemetry(latency: float, major: str) -> None:
         pass
 
 
+# --- Theme -------------------------------------------------------------------
+TU_GOLD = gr.themes.Color(
+    name="tu_gold",
+    c50="#FFF9E8",
+    c100="#FFF1C6",
+    c200="#FFE49B",
+    c300="#FFD466",
+    c400="#FFC53D",
+    c500="#FFB81C",
+    c600="#E0A100",
+    c700="#B37F00",
+    c800="#805B00",
+    c900="#4D3700",
+    c950="#261B00",
+)
+TU_INK = gr.themes.Color(
+    name="tu_ink",
+    c50="#F6F6F7",
+    c100="#EDEDEF",
+    c200="#DBDBDF",
+    c300="#C2C2C8",
+    c400="#9A9AA2",
+    c500="#6E6E78",
+    c600="#4B4B54",
+    c700="#32323A",
+    c800="#1F1F24",
+    c900="#121216",
+    c950="#000000",
+)
+
+# Blackboard-style neutrals with Towson black + gold; Open Sans is the closest
+# widely-available match to the Learning/Edu UI stack.
+THEME = gr.themes.Base(
+    primary_hue=TU_GOLD,
+    secondary_hue=TU_GOLD,
+    neutral_hue=TU_INK,
+    font=[gr.themes.GoogleFont("Open Sans"), "ui-sans-serif", "system-ui", "sans-serif"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "ui-monospace", "monospace"],
+)
+
+CSS = """
+.gradio-container { max-width: 1120px !important; margin: 0 auto !important; }
+
+/* header */
+#tu-header { display: flex; align-items: center; gap: 14px; margin: 10px 0 2px; }
+#tu-header .tu-mark {
+  flex: none; width: 46px; height: 46px; border-radius: 13px;
+  background: #FFB81C; color: #111114; font-weight: 800; font-size: 17px;
+  letter-spacing: -.5px; display: flex; align-items: center; justify-content: center;
+}
+#tu-header .tu-name { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -.6px; }
+#tu-header .tu-tag { margin: 2px 0 0; font-size: 13.5px; color: var(--body-text-color-subdued); }
+
+/* student card */
+#tu-card {
+  border: 1px solid var(--border-color-primary); border-radius: 14px;
+  background: var(--block-background-fill); padding: 15px 17px;
+}
+#tu-card h4 {
+  margin: 0 0 9px; font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--body-text-color-subdued); font-weight: 700;
+}
+#tu-card .tu-row {
+  display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px;
+}
+#tu-card .tu-k { color: var(--body-text-color-subdued); flex: none; }
+#tu-card .tu-v { font-weight: 600; text-align: right; word-break: break-word; }
+#tu-card .tu-hint, .tu-note {
+  font-size: 12.5px; line-height: 1.55; color: var(--body-text-color-subdued);
+}
+.tu-note { padding: 10px 4px 0; }
+
+/* chat surface */
+#tu-chat { border-radius: 16px; }
+#tu-chat p, #tu-chat li { line-height: 1.62; }
+"""
+
+
+def render_student_card(profile) -> str:
+    """Small sidebar card showing whatever intake data we have so far."""
+    profile = profile or {}
+    rows = []
+    if profile.get("name"):
+        rows.append(("Student", profile["name"]))
+    if profile.get("student_id"):
+        rows.append(("ID", profile["student_id"]))
+    if profile.get("major"):
+        rows.append(("Program", profile["major"]))
+
+    if rows:
+        body = "".join(
+            f'<div class="tu-row"><span class="tu-k">{html.escape(key)}</span>'
+            f'<span class="tu-v">{html.escape(str(value))}</span></div>'
+            for key, value in rows
+        )
+    else:
+        body = '<p class="tu-hint">Your details appear here once we\'ve introduced ourselves.</p>'
+
+    return f'<div id="tu-card"><h4>Student</h4>{body}</div>'
+
+
 # --- Chat handler ------------------------------------------------------------
-def respond(message, history, profile):
+def _respond_core(message, history, profile):
     """One chat turn: run the intake state machine, then stream advising."""
     profile = {**DEFAULT_PROFILE, **(profile or {})}
     history = list(history or [])
@@ -358,8 +460,19 @@ def respond(message, history, profile):
     yield history, profile, ""
 
 
+def respond(message, history, profile):
+    """Wrap the core generator so the sidebar card tracks the profile."""
+    for history_out, profile_out, box in _respond_core(message, history, profile):
+        yield history_out, profile_out, box, render_student_card(profile_out)
+
+
 def start_over():
-    return [{"role": "assistant", "content": WELCOME}], dict(DEFAULT_PROFILE), ""
+    return (
+        [{"role": "assistant", "content": WELCOME}],
+        dict(DEFAULT_PROFILE),
+        "",
+        render_student_card(DEFAULT_PROFILE),
+    )
 
 
 def _launch_auth():
@@ -372,35 +485,50 @@ def _launch_auth():
 
 
 # --- UI ----------------------------------------------------------------------
-with gr.Blocks(title="CIS Degree Plan Advisor") as ui:
-    gr.Markdown("# \U0001F393 CIS Degree Plan Advisor")
-    gr.Markdown(
-        "A conversational academic advisor for Towson University's Department of "
-        "Computer and Information Sciences. Every answer is grounded in the "
-        f"official catalog, via `{MODEL_NAME}`."
+with gr.Blocks(title="TUAdvisor") as ui:
+    gr.HTML(
+        '<div id="tu-header">'
+        '<div class="tu-mark">TU</div>'
+        "<div>"
+        '<h1 class="tu-name">TUAdvisor</h1>'
+        '<p class="tu-tag">Towson University &middot; Computer and Information Sciences</p>'
+        "</div>"
+        "</div>"
     )
 
-    chatbot = gr.Chatbot(
-        value=[{"role": "assistant", "content": WELCOME}],
-        height=520,
-        label="CIS Advisor",
-        line_breaks=True,
-    )
     with gr.Row():
-        message = gr.Textbox(
-            placeholder="Type your answer or question...",
-            show_label=False,
-            scale=8,
-            lines=1,
-        )
-        send = gr.Button("Send", variant="primary", scale=1)
-    reset = gr.Button("Start over", variant="secondary")
+        with gr.Column(scale=3, min_width=430):
+            chatbot = gr.Chatbot(
+                value=[{"role": "assistant", "content": WELCOME}],
+                height=530,
+                show_label=False,
+                line_breaks=True,
+                elem_id="tu-chat",
+            )
+            with gr.Row():
+                message = gr.Textbox(
+                    placeholder="Type your answer or question...",
+                    show_label=False,
+                    scale=8,
+                    lines=1,
+                )
+                send = gr.Button("Send", variant="primary", scale=1)
+            reset = gr.Button("Start over", variant="secondary")
+
+        with gr.Column(scale=1, min_width=250):
+            student_card = gr.HTML(render_student_card(DEFAULT_PROFILE))
+            gr.HTML(
+                '<div class="tu-note">Answers come from the official Towson catalog '
+                "for the program you pick. Confirm anything binding with your "
+                "department advisor.</div>"
+            )
 
     profile = gr.State(dict(DEFAULT_PROFILE))
 
-    send.click(respond, [message, chatbot, profile], [chatbot, profile, message])
-    message.submit(respond, [message, chatbot, profile], [chatbot, profile, message])
-    reset.click(start_over, None, [chatbot, profile, message])
+    outputs = [chatbot, profile, message, student_card]
+    send.click(respond, [message, chatbot, profile], outputs)
+    message.submit(respond, [message, chatbot, profile], outputs)
+    reset.click(start_over, None, outputs)
 
 
 if __name__ == "__main__":
@@ -408,4 +536,6 @@ if __name__ == "__main__":
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
         auth=_launch_auth(),
+        theme=THEME,
+        css=CSS,
     )

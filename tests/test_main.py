@@ -250,8 +250,43 @@ def test_telemetry_failure_never_breaks_chat(fake_stream, monkeypatch, tmp_path)
 
 # --- Restart -----------------------------------------------------------------
 def test_start_over_resets_everything():
-    history, profile, box = start_over()
+    history, profile, box, card = start_over()
     assert profile == main.DEFAULT_PROFILE
     assert box == ""
     assert "What can I do for you today" not in history[0]["content"]
     assert "name" in history[0]["content"].lower()
+    assert "tu-card" in card
+
+
+# --- Student card ------------------------------------------------------------
+def test_respond_updates_the_student_card():
+    *_, last = main.respond("Jane Doe", [], dict(main.DEFAULT_PROFILE))
+    assert len(last) == 4
+    assert "Jane Doe" in last[3]
+
+
+def test_student_card_shows_collected_details():
+    card = main.render_student_card(
+        {
+            "stage": "chat",
+            "name": "Jane Doe",
+            "student_id": "T01234567",
+            "major": "Computer Science",
+        }
+    )
+    assert "Jane Doe" in card
+    assert "T01234567" in card
+    assert "Computer Science" in card
+
+
+def test_student_card_is_empty_before_intake():
+    card = main.render_student_card(dict(main.DEFAULT_PROFILE))
+    assert "tu-hint" in card
+
+
+def test_student_card_escapes_html():
+    card = main.render_student_card(
+        {"name": "<script>alert(1)</script>", "student_id": "", "major": ""}
+    )
+    assert "<script>" not in card
+    assert "&lt;script&gt;" in card

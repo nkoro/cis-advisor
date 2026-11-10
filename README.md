@@ -1,4 +1,4 @@
-# CIS Degree Plan Advisor
+# TUAdvisor
 
 A conversational academic advisor for Towson University's Department of Computer
 and Information Sciences. Students check in through chat (name, student ID,
