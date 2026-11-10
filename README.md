@@ -1,13 +1,3 @@
----
-title: CIS Advisor
-emoji: 🎓
-colorFrom: blue
-colorTo: green
-sdk: gradio
-app_file: app/main.py
-pinned: false
----
-
 # CIS Degree Plan Advisor
 
 Drafts Towson University CIS degree completion plans from the official catalog
@@ -114,7 +104,7 @@ python app/ingest.py
 
 ## Deployment
 
-This README keeps its Hugging Face Space frontmatter (`sdk: gradio`,
-`app_file: app/main.py`), so the same commit can still be pushed to a Space. The
-Docker path above is the recommended local-first option and runs on any
-container host.
+The app is a standard Gradio process, so it runs anywhere Python or Docker runs.
+The Docker path above is the supported deployment: `docker compose up --build`.
+No GPU, no external model host, and no third-party app platform is required --
+inference is a plain HTTPS call to the SiliconFlow API.
