@@ -22,6 +22,9 @@ __pycache__/
 # Tooling caches
 .pytest_cache/
 
+# Paper draft is kept local only - not published to the repository
+paper/
+
 # LaTeX build artefacts (the compiled .pdf is kept)
 *.aux
 *.log
