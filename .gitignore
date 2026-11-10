@@ -4,8 +4,17 @@ cis_env/
 __pycache__/
 *.py[cod]
 
-# Secrets
+# Secrets - .env.* covers .env.bak, .env.local, .env.save etc.
 .env
+.env.*
+!.env.example
+
+# Editor and backup droppings (vim swap files can contain file contents)
+*.swp
+*.swo
+*.orig
+*.bak
+*~
 
 # Generated research telemetry (data/telemetry.csv)
 *.csv
