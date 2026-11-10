@@ -350,13 +350,13 @@ CSS = """
 .gradio-container input,
 .gradio-container textarea,
 .gradio-container label {
-  font-weight: 600;
+  font-weight: 700;
 }
 #tu-chat p, #tu-chat li, #tu-chat td, #tu-chat th {
-  font-weight: 600;
+  font-weight: 700;
   font-size: 16px;
 }
-#tu-chat h1, #tu-chat h2, #tu-chat h3, #tu-chat strong { font-weight: 800; }
+#tu-chat h1, #tu-chat h2, #tu-chat h3, #tu-chat strong { font-weight: 900; }
 #tu-header .tu-name { font-weight: 900; }
 """
 
