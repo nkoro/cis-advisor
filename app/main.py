@@ -345,12 +345,19 @@ CSS = """
 #tu-chat p, #tu-chat li { line-height: 1.62; }
 
 /* Heavier text so the interface stays readable when scaled into a printed page */
-.gradio-container { font-weight: 500; }
-#tu-chat p, #tu-chat li, #tu-chat td, #tu-chat th {
-  font-weight: 500;
-  font-size: 15.5px;
+.gradio-container,
+.gradio-container button,
+.gradio-container input,
+.gradio-container textarea,
+.gradio-container label {
+  font-weight: 600;
 }
-#tu-chat h1, #tu-chat h2, #tu-chat h3, #tu-chat strong { font-weight: 700; }
+#tu-chat p, #tu-chat li, #tu-chat td, #tu-chat th {
+  font-weight: 600;
+  font-size: 16px;
+}
+#tu-chat h1, #tu-chat h2, #tu-chat h3, #tu-chat strong { font-weight: 800; }
+#tu-header .tu-name { font-weight: 900; }
 """
 
 
