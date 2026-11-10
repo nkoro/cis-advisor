@@ -21,3 +21,12 @@ __pycache__/
 
 # Tooling caches
 .pytest_cache/
+
+# LaTeX build artefacts (the compiled .pdf is kept)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.bbl
+*.blg
