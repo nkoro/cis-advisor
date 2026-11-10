@@ -1,20 +1,37 @@
 # CIS Degree Plan Advisor
 
-Drafts Towson University CIS degree completion plans from the official catalog
-text using the SiliconFlow API (Qwen2.5-72B) with Instructor for structured output.
+A conversational academic advisor for Towson University's Department of Computer
+and Information Sciences. Students check in through chat (name, student ID,
+program), then talk to an advisor that answers only from the official catalog.
 
 ## How it works
 
 ```
-Gradio UI  ->  generate_plan()  ->  Instructor + SiliconFlow (Qwen2.5-72B)
-                     |
-                     +--> data/<major>.md    (hard catalog routing)
-                     +--> data/telemetry.csv (latency research log)
+Student --> Gradio chat UI --> respond() --> SiliconFlow chat completions (streaming)
+                                   |
+                                   +--> intake state machine (name -> ID -> program)
+                                   +--> data/<major>.md    (catalog grounding)
+                                   +--> data/telemetry.csv (latency research log)
 ```
 
-`generate_plan()` performs *hard routing*: the selected major maps to exactly one
-markdown catalog file, which is injected into the system prompt as the only source
-of truth. There is no vector store and no retrieval step.
+`respond()` runs the intake state machine first, then streams the advisor reply.
+The chosen program maps to exactly one markdown catalog file, injected as the
+only source of truth in the system prompt -- no vector store, no retrieval step.
+
+## Model choice
+
+`deepseek-ai/DeepSeek-V4.1-Flash`, measured on this app's real workload (a
+~19k-token catalog prompt):
+
+| Model | Latency | Prompt cached | Cost / turn |
+| --- | --- | --- | --- |
+| **DeepSeek-V4.1-Flash** | **1.2-1.5 s** | 19,200 / 19,427 tok | **~$0.00013** |
+| GLM-5.3-Flash | 3.4-4.0 s | 20,224 / 20,305 tok | ~$0.00066 |
+| gpt-oss-20b | 2.1-2.3 s | none | ~$0.00080 |
+
+DeepSeek lists at $0.15 input / $0.003 cached / $0.60 output per 1M tokens. The
+cache discount is why the model with the cheapest *headline* input price is not
+the cheapest in practice here. Override with `SILICONFLOW_MODEL`.
 
 ## Quick start (local)
 
@@ -52,8 +69,10 @@ GPU is required because inference happens at SiliconFlow.
 | --- | --- | --- |
 | `SILICONFLOW_API_KEY` | *(required)* | SiliconFlow API key. Without it the UI reports a configuration error instead of calling the API. |
 | `SILICONFLOW_BASE_URL` | `https://api.siliconflow.com/v1` | API base URL. |
-| `SILICONFLOW_MODEL` | `Qwen/Qwen2.5-72B-Instruct` | Chat model used for planning. |
+| `SILICONFLOW_MODEL` | `deepseek-ai/DeepSeek-V4.1-Flash` | Chat model. |
 | `SILICONFLOW_TIMEOUT` | `180` | Per-request timeout, seconds. |
+| `SILICONFLOW_MAX_TOKENS` | `900` | Max tokens per reply. |
+| `ADVISOR_HISTORY_TURNS` | `12` | Past messages resent to the model. |
 | `SILICONFLOW_INSECURE_TLS` | `0` | Set to `1` only if your network does TLS inspection with an untrusted CA. |
 | `ADVISOR_USERNAME` / `ADVISOR_PASSWORD` | *(unset)* | Gradio basic-auth login. **If unset the UI has no login.** |
 | `GRADIO_SERVER_NAME` / `GRADIO_SERVER_PORT` | `0.0.0.0` / `7860` | Gradio bind address. |

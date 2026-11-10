@@ -1,10 +1,9 @@
-"""CIS Degree Plan Advisor.
+"""CIS Degree Plan Advisor - a conversational academic advisor.
 
-Gradio front end plus SiliconFlow (Qwen2.5-72B) routing logic for drafting
-Towson University CIS degree completion plans from the local markdown catalog
-in ``data/``.
+Gradio chat UI backed by the SiliconFlow API, grounded in a local markdown copy
+of the Towson University catalog (``data/*.md``).
 
-All configuration is environment driven -- see ``.env.example``.
+Configuration is environment driven -- see ``.env.example``.
 """
 
 import csv
@@ -13,24 +12,18 @@ import re
 import time
 import warnings
 from pathlib import Path
-from typing import List
+from typing import Iterator, Optional
 
 import gradio as gr
 import httpx
-import instructor
 from openai import OpenAI
-from pydantic import BaseModel
 
 # --- Paths -------------------------------------------------------------------
-# This file lives at <repo root>/app/main.py, so resolve data/ relative to this
-# file rather than the current working directory. `python app/main.py`,
-# `python -m app.main` and container runs then all behave identically.
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 TELEMETRY_PATH = DATA_DIR / "telemetry.csv"
 
-# Optional convenience for local development; never required.
-try:
+try:  # optional local convenience
     from dotenv import load_dotenv
 
     load_dotenv(ROOT_DIR / ".env")
@@ -38,24 +31,19 @@ except ImportError:
     pass
 
 # --- Configuration -----------------------------------------------------------
-MODEL_NAME = os.environ.get("SILICONFLOW_MODEL", "Qwen/Qwen2.5-72B-Instruct")
+# Chosen by benchmark (Nov 2026): fastest of the cheap tier (~1.3s/turn) and, via
+# SiliconFlow prefix caching, ~99% of the ~19k-token catalog is billed at the
+# cached rate ($0.003/M) instead of $0.15/M. Measured ~$0.00013 per turn.
+MODEL_NAME = os.environ.get("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash")
 API_BASE_URL = os.environ.get("SILICONFLOW_BASE_URL", "https://api.siliconflow.com/v1")
 API_KEY = os.environ.get("SILICONFLOW_API_KEY", "").strip()
+MAX_TOKENS = int(os.environ.get("SILICONFLOW_MAX_TOKENS", "900"))
+HISTORY_TURNS = int(os.environ.get("ADVISOR_HISTORY_TURNS", "12"))
 
-# Campus networks sometimes perform TLS inspection with an untrusted root CA,
-# which makes httpx reject the certificate. Opt in to insecure TLS explicitly
-# instead of silently disabling verification for every request.
-INSECURE_TLS = os.environ.get("SILICONFLOW_INSECURE_TLS", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-}
-
+INSECURE_TLS = os.environ.get("SILICONFLOW_INSECURE_TLS", "").strip().lower() in {"1", "true", "yes"}
 if INSECURE_TLS:
     warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
-# Explicit dropdown label -> catalog filename mapping. A missing entry is a hard
-# error rather than a silently generated (and therefore wrong) filename.
 MAJOR_FILES = {
     "Information Technology": "information_technology.md",
     "Computer and Mathematical Sciences": "computer_and_mathematical_sciences.md",
@@ -67,51 +55,25 @@ MAJOR_FILES = {
     ),
 }
 MAJOR_CHOICES = list(MAJOR_FILES)
+MAJOR_MENU = "\n".join(f"{i}. {name}" for i, name in enumerate(MAJOR_CHOICES, 1))
 
-PII_MESSAGE = "ERROR: Sensitive PII detected."
-
-SYSTEM_PROMPT = """You are a strict academic advisor for Towson University.
-Your sole purpose is to draft Degree Completion Plans based EXACTLY on the provided context.
-
-STRICT RULES:
-1. Do not answer questions outside of degree planning.
-2. NEVER place a course the student has already taken (or is currently taking) into a
-   future semester. Treat those courses as satisfied and omit them from the plan.
-3. Verify prerequisites are met before placing a course in a future semester.
-4. Use course codes and titles exactly as they appear in the catalog. Where the
-   catalog itself uses generic labels ("Core 1" through "Core 14", "Elective"),
-   keep that label, but never invent new placeholder tokens such as "Elective1"
-   or "Course A".
-5. List each course at most once across the entire plan.
-6. Respect the student's stated schedule preferences.
-
-CATALOG CONTEXT:
-{catalog}
-"""
-
-
-# --- Structured output schema ------------------------------------------------
-class SemesterPlan(BaseModel):
-    semester_name: str
-    courses: List[str]
-    total_credits: int
-
-
-class DegreePlanDraft(BaseModel):
-    remaining_requirements_met: bool
-    plan: List[SemesterPlan]
-    advisor_notes: str
-
+DEFAULT_PROFILE = {"stage": "name", "name": "", "student_id": "", "major": ""}
 
 # --- PII guard ---------------------------------------------------------------
-# Enforced deterministically in code: a prompt instruction alone cannot satisfy a
-# strict JSON response schema, so the model cannot reliably emit the refusal text.
+# Enforced in code, before anything reaches the API.
 SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 CARD_RE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
+NAME_RE = re.compile(r"^[A-Za-z][A-Za-z .'\-]{0,49}$")
+STUDENT_ID_RE = re.compile(r"^[A-Za-z0-9\-]{3,20}$")
+
+PII_MESSAGE = (
+    "I'd rather not handle that here - it looks like a Social Security or card "
+    "number. Please keep those to yourself. What can I help you with regarding "
+    "your degree?"
+)
 
 
 def _luhn_ok(digits: str) -> bool:
-    """Standard Luhn checksum, used to avoid flagging arbitrary long numbers."""
     total, parity = 0, len(digits) % 2
     for index, char in enumerate(digits):
         value = int(char)
@@ -135,33 +97,137 @@ def contains_pii(*values: str) -> bool:
     return False
 
 
-# --- SiliconFlow client ------------------------------------------------------
+# --- Conversation copy -------------------------------------------------------
+WELCOME = (
+    "\U0001F44B Hi! I'm the **CIS Advisor** for Towson University's Department of "
+    "Computer and Information Sciences.\n\nBefore we start, **what's your name?**"
+)
+
+ASK_STUDENT_ID = "Great to meet you, **{name}**! \U0001F393\n\nWhat's your **student ID**?"
+
+ASK_MAJOR = "Thanks! Which program are you in? Reply with a number or the name:\n\n{menu}"
+
+GREETING = (
+    "Perfect - **{major}**. I've got that catalog in front of me, **{name}**.\n\n"
+    "**What can I do for you today?** For example:\n"
+    "- *What should I take next semester?*\n"
+    "- *Am I on track to graduate?*\n"
+    "- *Build me a plan for my remaining semesters.*"
+)
+
+
+# --- Advisor prompt ----------------------------------------------------------
+# NOTE: the catalog is appended with plain concatenation, never str.format(),
+# because catalog text can contain braces.
+ADVISOR_SYSTEM = """You are "CIS Advisor", a warm, professional academic advisor in Towson University's Department of Computer and Information Sciences.
+
+STUDENT ON FILE
+- Name: {name}
+- Student ID: {student_id}
+- Program: {major}
+
+WHAT YOU HELP WITH
+Only course and degree advising for this student: degree requirements, which courses to take and in what order, prerequisites, electives, credit loads, graduation progress and scheduling. If the student asks about anything else (other majors, campus admin, personal matters, general chit-chat, coding help), decline in one short friendly sentence and steer back to their degree plan.
+
+HOW TO CONVERSE
+- Warm and concise: 2-5 sentences unless you are presenting a plan.
+- Ask at most two questions per message; never fire a long questionnaire.
+- When a planning request first comes up, work out naturally over a message or two: (1) which courses they have completed or are taking now, (2) which terms the plan should cover, (3) preferences such as credits per semester, mornings or evenings, online or on campus. Skip anything they have already told you and never re-ask it.
+- When you have enough, present the plan as a markdown table: Term | Course | Title | Credits, then the total credits.
+
+ACCURACY RULES
+- Use ONLY the catalog below for requirements, prerequisites and credit values. If something is not there, say you cannot confirm it and suggest checking with the department. Never invent a course, prerequisite or credit value.
+- Never schedule a course the student has already completed or is currently taking.
+- Confirm a prerequisite is satisfied before placing a course in a later term.
+- The catalog's own generic labels ("Core 1" to "Core 14", "Elective") are legitimate names; reuse them exactly and do not invent new placeholder codes."""
+
+CONFIG_ERROR = (
+    "**Configuration error:** `SILICONFLOW_API_KEY` is not set. Add it to your "
+    "environment or `.env` file and restart the app."
+)
+
+_CATALOG_CACHE = {}
+
+
+def load_catalog(major: str) -> str:
+    """Read a major's catalog once and keep it in memory."""
+    if major not in _CATALOG_CACHE:
+        _CATALOG_CACHE[major] = (DATA_DIR / MAJOR_FILES[major]).read_text(encoding="utf-8")
+    return _CATALOG_CACHE[major]
+
+
+def advisor_system(profile, catalog: str) -> str:
+    header = ADVISOR_SYSTEM.format(
+        name=profile.get("name") or "Unknown",
+        student_id=profile.get("student_id") or "Unknown",
+        major=profile.get("major") or "Unknown",
+    )
+    return header + "\n\nCATALOG FOR " + str(profile.get("major")) + "\n" + catalog
+
+
+def _normalise(text: str) -> str:
+    text = (text or "").lower().replace("&", " and ")
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def match_major(answer: str) -> Optional[str]:
+    """Resolve a typed answer to a program name (number, exact or partial)."""
+    text = (answer or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        index = int(text)
+        return MAJOR_CHOICES[index - 1] if 1 <= index <= len(MAJOR_CHOICES) else None
+    target = _normalise(text)
+    if not target:
+        return None
+    for major in MAJOR_CHOICES:
+        if _normalise(major) == target:
+            return major
+    partial = [
+        major
+        for major in MAJOR_CHOICES
+        if _normalise(major) in target or target in _normalise(major)
+    ]
+    return max(partial, key=lambda major: len(_normalise(major))) if partial else None
+
+
 def _build_client():
-    """Build the Instructor client, or return None when no key is configured."""
     if not API_KEY:
         return None
-    return instructor.from_openai(
-        OpenAI(
-            base_url=API_BASE_URL,
-            api_key=API_KEY,
-            http_client=httpx.Client(
-                verify=not INSECURE_TLS,
-                timeout=httpx.Timeout(
-                    float(os.environ.get("SILICONFLOW_TIMEOUT", "180")), connect=15.0
-                ),
-            ),
-            max_retries=2,
+    return OpenAI(
+        base_url=API_BASE_URL,
+        api_key=API_KEY,
+        http_client=httpx.Client(
+            verify=not INSECURE_TLS,
+            timeout=httpx.Timeout(float(os.environ.get("SILICONFLOW_TIMEOUT", "180")), connect=15.0),
         ),
-        mode=instructor.Mode.JSON,
+        max_retries=2,
     )
 
 
 client = _build_client()
 
+def stream_reply(messages) -> Iterator[str]:
+    """Yield text deltas from the model."""
+    stream = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=MAX_TOKENS,
+        stream=True,
+    )
+    for chunk in stream:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+        piece = getattr(choices[0].delta, "content", None)
+        if piece:
+            yield piece
 
-# --- Telemetry ---------------------------------------------------------------
-def _log_telemetry(latency: float, major: str) -> None:
-    """Append one research row. Telemetry must never break a plan."""
+
+def log_telemetry(latency: float, major: str) -> None:
+    """Append one research row. Telemetry must never break a conversation."""
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         is_new = not TELEMETRY_PATH.exists()
@@ -174,70 +240,128 @@ def _log_telemetry(latency: float, major: str) -> None:
         pass
 
 
-# --- Output formatting -------------------------------------------------------
-def _format_plan(name: str, student_id: str, resp: DegreePlanDraft, latency: float) -> str:
-    total = sum(semester.total_credits for semester in resp.plan)
-    status = "On Track" if resp.remaining_requirements_met else "Outstanding Requirements Remain"
-    output = f"### Plan for {name} ({student_id})\n**Status:** {status}\n\n"
-    for semester in resp.plan:
-        output += f"**{semester.semester_name}** ({semester.total_credits} credits)\n"
-        for course in semester.courses:
-            output += f"- {course}\n"
-        output += "\n"
-    output += f"**Total planned credits:** {total}\n\n"
-    output += f"**Advisor Notes:**\n{resp.advisor_notes}\n\n"
-    output += f"*Generated in {latency} seconds using SiliconFlow ({MODEL_NAME})*"
-    return output
+# --- Chat handler ------------------------------------------------------------
+def respond(message, history, profile):
+    """One chat turn: run the intake state machine, then stream advising."""
+    profile = {**DEFAULT_PROFILE, **(profile or {})}
+    history = list(history or [])
+    text = (message or "").strip()
 
+    if not text:
+        yield history, profile, ""
+        return
 
-# --- Core advisory function --------------------------------------------------
-def generate_plan(name, student_id, major, courses_taken, preferences):
-    start_time = time.time()
+    history.append({"role": "user", "content": text})
 
-    if client is None:
-        return (
-            "**Configuration error:** `SILICONFLOW_API_KEY` is not set. "
-            "Add it to your environment (or a local `.env` file) and restart the app."
-        )
+    if contains_pii(text):
+        history.append({"role": "assistant", "content": PII_MESSAGE})
+        yield history, profile, ""
+        return
 
-    if not major or major not in MAJOR_FILES:
-        return "Error: please select a major from the list."
+    stage = profile["stage"]
 
-    if contains_pii(name, student_id, courses_taken, preferences):
-        return PII_MESSAGE
+    # --- intake ---------------------------------------------------------
+    if stage == "name":
+        if not NAME_RE.match(text):
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": "Sorry, I need a name to get started - letters only, please.",
+                }
+            )
+        else:
+            profile["name"] = " ".join(text.split())
+            profile["stage"] = "student_id"
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": ASK_STUDENT_ID.format(name=profile["name"]),
+                }
+            )
+        yield history, profile, ""
+        return
 
-    file_path = DATA_DIR / MAJOR_FILES[major]
+    if stage == "student_id":
+        if not STUDENT_ID_RE.match(text):
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": "That doesn't look like a student ID. Send it as letters "
+                    "and numbers, e.g. `T01234567`.",
+                }
+            )
+        else:
+            profile["student_id"] = text.upper()
+            profile["stage"] = "major"
+            history.append({"role": "assistant", "content": ASK_MAJOR.format(menu=MAJOR_MENU)})
+        yield history, profile, ""
+        return
+
+    if stage == "major":
+        major = match_major(text)
+        if major is None:
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": "I couldn't match that to a program.\n\n"
+                    + ASK_MAJOR.format(menu=MAJOR_MENU),
+                }
+            )
+        else:
+            profile["major"] = major
+            profile["stage"] = "chat"
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": GREETING.format(name=profile["name"], major=major),
+                }
+            )
+        yield history, profile, ""
+        return
+
+    # --- advising -------------------------------------------------------
+    if client is None or not profile.get("major"):
+        history.append({"role": "assistant", "content": CONFIG_ERROR})
+        yield history, profile, ""
+        return
+
     try:
-        major_context = file_path.read_text(encoding="utf-8")
+        catalog = load_catalog(profile["major"])
     except OSError:
-        return f"Error: context file for {major} not found ({file_path})."
-
-    user_prompt = (
-        f"Student: {name} ({student_id})\n"
-        f"Already taken / currently taking (do NOT reschedule these): "
-        f"{courses_taken.strip() or 'none reported'}\n"
-        f"Preferences: {preferences.strip() or 'none'}"
-    )
-
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            response_model=DegreePlanDraft,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT.format(catalog=major_context)},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,  # Keep it deterministic
+        history.append(
+            {
+                "role": "assistant",
+                "content": f"Sorry, I can't load the catalog for {profile['major']}.",
+            }
         )
-    except Exception as exc:  # noqa: BLE001 - surfaced directly in the UI
-        return f"Inference Error: {exc}"
+        yield history, profile, ""
+        return
 
-    latency = round(time.time() - start_time, 2)
-    _log_telemetry(latency, major)
-    return _format_plan(name, student_id, resp, latency)
+    messages = [{"role": "system", "content": advisor_system(profile, catalog)}]
+    messages += history[-HISTORY_TURNS:]
+
+    started = time.time()
+    answer = ""
+    failed = False
+    history.append({"role": "assistant", "content": "..."})
+    try:
+        for piece in stream_reply(messages):
+            answer += piece
+            yield history[:-1] + [{"role": "assistant", "content": answer}], profile, ""
+    except Exception as exc:  # noqa: BLE001 - surfaced to the student
+        failed = True
+        answer = answer or f"Sorry - I hit an error reaching the model.\n\n`{str(exc)[:300]}`"
+
+    history[-1] = {"role": "assistant", "content": answer or "_(no response generated)_"}
+    if not failed and answer:
+        log_telemetry(round(time.time() - started, 2), profile["major"])
+    yield history, profile, ""
 
 
-# --- Gradio UI ---------------------------------------------------------------
+def start_over():
+    return [{"role": "assistant", "content": WELCOME}], dict(DEFAULT_PROFILE), ""
+
+
 def _launch_auth():
     user = os.environ.get("ADVISOR_USERNAME", "").strip()
     password = os.environ.get("ADVISOR_PASSWORD", "").strip()
@@ -247,31 +371,36 @@ def _launch_auth():
     return None
 
 
+# --- UI ----------------------------------------------------------------------
 with gr.Blocks(title="CIS Degree Plan Advisor") as ui:
-    gr.Markdown("# CIS Degree Plan Advisor")
+    gr.Markdown("# \U0001F393 CIS Degree Plan Advisor")
     gr.Markdown(
-        "Drafts a Towson University degree completion plan from the official catalog "
-        f"context. Plans are generated by `{MODEL_NAME}` via the SiliconFlow API."
+        "A conversational academic advisor for Towson University's Department of "
+        "Computer and Information Sciences. Every answer is grounded in the "
+        f"official catalog, via `{MODEL_NAME}`."
+    )
+
+    chatbot = gr.Chatbot(
+        value=[{"role": "assistant", "content": WELCOME}],
+        height=520,
+        label="CIS Advisor",
+        line_breaks=True,
     )
     with gr.Row():
-        with gr.Column():
-            name = gr.Textbox(label="Student Name")
-            student_id = gr.Textbox(label="Student ID")
-            major = gr.Dropdown(choices=MAJOR_CHOICES, label="Select Major")
-            courses = gr.Textbox(label="Courses Taken/Taking (Comma separated)", lines=3)
-            prefs = gr.Textbox(
-                label="Schedule Preferences (e.g., Max 15 credits, no mornings)", lines=2
-            )
-            submit = gr.Button("Generate Plan", variant="primary")
+        message = gr.Textbox(
+            placeholder="Type your answer or question...",
+            show_label=False,
+            scale=8,
+            lines=1,
+        )
+        send = gr.Button("Send", variant="primary", scale=1)
+    reset = gr.Button("Start over", variant="secondary")
 
-        with gr.Column():
-            output_display = gr.Markdown(label="Generated Plan")
+    profile = gr.State(dict(DEFAULT_PROFILE))
 
-    submit.click(
-        fn=generate_plan,
-        inputs=[name, student_id, major, courses, prefs],
-        outputs=output_display,
-    )
+    send.click(respond, [message, chatbot, profile], [chatbot, profile, message])
+    message.submit(respond, [message, chatbot, profile], [chatbot, profile, message])
+    reset.click(start_over, None, [chatbot, profile, message])
 
 
 if __name__ == "__main__":
@@ -280,4 +409,3 @@ if __name__ == "__main__":
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
         auth=_launch_auth(),
     )
-
