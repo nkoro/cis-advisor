@@ -38,8 +38,14 @@ except ImportError:
 MODEL_NAME = os.environ.get("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash")
 API_BASE_URL = os.environ.get("SILICONFLOW_BASE_URL", "https://api.siliconflow.com/v1")
 API_KEY = os.environ.get("SILICONFLOW_API_KEY", "").strip()
-MAX_TOKENS = int(os.environ.get("SILICONFLOW_MAX_TOKENS", "900"))
+MAX_TOKENS = int(os.environ.get("SILICONFLOW_MAX_TOKENS", "1500"))
 HISTORY_TURNS = int(os.environ.get("ADVISOR_HISTORY_TURNS", "12"))
+
+# Reasoning-capable models bill hidden reasoning against max_tokens. Observed on
+# this model: 900/900 tokens spent on reasoning and ZERO characters of visible
+# reply, which surfaced to the student as an empty message. "none" disables it;
+# set "low"/"medium"/"high" to trade latency and cost for deeper planning.
+REASONING_EFFORT = os.environ.get("SILICONFLOW_REASONING_EFFORT", "none").strip().lower()
 
 INSECURE_TLS = os.environ.get("SILICONFLOW_INSECURE_TLS", "").strip().lower() in {"1", "true", "yes"}
 if INSECURE_TLS:
@@ -100,7 +106,7 @@ def contains_pii(*values: str) -> bool:
 
 # --- Conversation copy -------------------------------------------------------
 WELCOME = (
-    "\U0001F44B Hi! I'm the **CIS Advisor** for Towson University's Department of "
+    "\U0001F44B Hi! I'm the **TUAdvisor** for Towson University's Department of "
     "Computer and Information Sciences.\n\nBefore we start, **what's your name?**"
 )
 
@@ -209,15 +215,34 @@ def _build_client():
 
 client = _build_client()
 
-def stream_reply(messages) -> Iterator[str]:
-    """Yield text deltas from the model."""
-    stream = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.3,
-        max_tokens=MAX_TOKENS,
-        stream=True,
-    )
+def _stream_kwargs(max_tokens: Optional[int] = None) -> dict:
+    """Request parameters for one model call."""
+    kwargs = {
+        "model": MODEL_NAME,
+        "temperature": 0.3,
+        "max_tokens": max_tokens or MAX_TOKENS,
+        "stream": True,
+    }
+    if REASONING_EFFORT:
+        kwargs["reasoning_effort"] = REASONING_EFFORT
+    return kwargs
+
+
+def stream_reply(messages, max_tokens: Optional[int] = None) -> Iterator[str]:
+    """Yield visible text deltas from the model.
+
+    ``reasoning_effort`` is passed only when configured, and a model that rejects
+    it is retried without the parameter rather than failing the turn.
+    """
+    kwargs = _stream_kwargs(max_tokens)
+    try:
+        stream = client.chat.completions.create(messages=messages, **kwargs)
+    except Exception:
+        if "reasoning_effort" not in kwargs:
+            raise
+        kwargs.pop("reasoning_effort")
+        stream = client.chat.completions.create(messages=messages, **kwargs)
+
     for chunk in stream:
         choices = getattr(chunk, "choices", None)
         if not choices:
@@ -454,7 +479,25 @@ def _respond_core(message, history, profile):
         failed = True
         answer = answer or f"Sorry - I hit an error reaching the model.\n\n`{str(exc)[:300]}`"
 
-    history[-1] = {"role": "assistant", "content": answer or "_(no response generated)_"}
+    # A reasoning model can exhaust the token budget before emitting any visible
+    # text. Retry once with far more room before giving up on the student.
+    if not answer and not failed:
+        try:
+            for piece in stream_reply(messages, max_tokens=MAX_TOKENS * 3):
+                answer += piece
+                yield history[:-1] + [{"role": "assistant", "content": answer}], profile, ""
+        except Exception as exc:  # noqa: BLE001
+            failed = True
+            answer = f"Sorry - I hit an error reaching the model.\n\n`{str(exc)[:300]}`"
+
+    history[-1] = {
+        "role": "assistant",
+        "content": answer
+        or (
+            "I didn't manage to produce a reply there - the model returned no "
+            "text. Please ask again, or split a long request into shorter ones."
+        ),
+    }
     if not failed and answer:
         log_telemetry(round(time.time() - started, 2), profile["major"])
     yield history, profile, ""

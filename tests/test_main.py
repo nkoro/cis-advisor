@@ -36,10 +36,11 @@ def fake_stream(monkeypatch):
     """Replace the model stream with canned deltas."""
 
     def _install(pieces, error=None):
-        captured = {}
+        captured = {"max_tokens": []}
 
-        def _gen(messages):
+        def _gen(messages, max_tokens=None):
             captured["messages"] = messages
+            captured["max_tokens"].append(max_tokens)
             for piece in pieces:
                 yield piece
             if error:
@@ -290,3 +291,47 @@ def test_student_card_escapes_html():
     )
     assert "<script>" not in card
     assert "&lt;script&gt;" in card
+
+
+# --- Empty replies / reasoning budget ----------------------------------------
+def test_request_disables_hidden_reasoning_by_default(monkeypatch):
+    monkeypatch.setattr(main, "REASONING_EFFORT", "none")
+    kwargs = main._stream_kwargs()
+    assert kwargs["reasoning_effort"] == "none"
+    assert kwargs["max_tokens"] == main.MAX_TOKENS
+
+
+def test_bigger_budget_can_be_requested():
+    assert main._stream_kwargs(main.MAX_TOKENS * 3)["max_tokens"] == main.MAX_TOKENS * 3
+
+
+def test_empty_first_reply_is_retried_with_a_larger_budget(monkeypatch, telemetry):
+    """Regression: a reasoning model can spend the whole budget and emit nothing."""
+    calls = []
+
+    def _gen(messages, max_tokens=None):
+        calls.append(max_tokens)
+        if len(calls) >= 2:
+            yield "recovered plan"
+
+    monkeypatch.setattr(main, "stream_reply", _gen)
+    monkeypatch.setattr(main, "client", object())
+
+    history, _ = turn("build my plan", profile=IN_CHAT)
+    assert history[-1]["content"] == "recovered plan"
+    assert len(calls) == 2
+    assert calls[0] is None
+    assert calls[1] == main.MAX_TOKENS * 3
+
+
+def test_persistent_empty_reply_explains_itself(monkeypatch, telemetry):
+    def _gen(messages, max_tokens=None):
+        return
+        yield  # pragma: no cover - keeps this a generator
+
+    monkeypatch.setattr(main, "stream_reply", _gen)
+    monkeypatch.setattr(main, "client", object())
+
+    history, _ = turn("hello", profile=IN_CHAT)
+    assert "no text" in history[-1]["content"]
+    assert "no response generated" not in history[-1]["content"]
