@@ -46,6 +46,12 @@ set -a; source .env; set +a
 python app/main.py        # http://localhost:7860
 ```
 
+`SILICONFLOW_API_KEY` is **not** in this repository and `.env` is gitignored, so a
+fresh clone has no key. Each person running the app needs their own key, created at
+[cloud.siliconflow.com](https://cloud.siliconflow.com/) - the `.com` console. A key
+from `siliconflow.cn` is rejected by the endpoint this app calls with
+`Token is invalid`. Signup includes free credit.
+
 Check API connectivity without starting the UI:
 
 ```bash

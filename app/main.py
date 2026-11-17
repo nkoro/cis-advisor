@@ -149,9 +149,21 @@ ACCURACY RULES
 - The catalog's own generic labels ("Core 1" to "Core 14", "Elective") are legitimate names; reuse them exactly and do not invent new placeholder codes."""
 
 CONFIG_ERROR = (
-    "**Configuration error:** `SILICONFLOW_API_KEY` is not set. Add it to your "
-    "environment or `.env` file and restart the app."
+    "**Configuration error:** `SILICONFLOW_API_KEY` is not set.\n\n"
+    "To fix this:\n"
+    "1. Create a key at https://cloud.siliconflow.com/ - the **.com** console. "
+    "A key from `siliconflow.cn` is rejected by this endpoint with *Token is invalid*.\n"
+    "2. In the repository root run `cp .env.example .env`.\n"
+    "3. Set `SILICONFLOW_API_KEY=sk-...` in `.env` (lowercase `sk-`), then restart the app."
 )
+
+CONFIG_HELP = f"""
+[setup] SILICONFLOW_API_KEY is not set, so no reply can be generated.
+        1. Create a key at https://cloud.siliconflow.com/ (the .com console;
+           a .cn key is rejected by {API_BASE_URL}).
+        2. cp .env.example .env      # from the repository root
+        3. set  SILICONFLOW_API_KEY=sk-...   in .env, then restart.
+"""
 
 _CATALOG_CACHE = {}
 
@@ -592,6 +604,8 @@ with gr.Blocks(title="TUAdvisor") as ui:
 
 
 if __name__ == "__main__":
+    if client is None:
+        print(CONFIG_HELP)
     ui.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
