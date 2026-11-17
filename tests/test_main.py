@@ -115,6 +115,21 @@ def test_contains_pii_allows(value):
     assert contains_pii(value) is False
 
 
+def test_env_example_never_contains_a_real_key():
+    """`.env.example` is tracked by git, so a real key there gets published.
+
+    This has already happened once in this repository.
+    """
+    example = (main.ROOT_DIR / ".env.example").read_text(encoding="utf-8")
+    lines = [l for l in example.splitlines() if l.startswith("SILICONFLOW_API_KEY=")]
+    assert lines, "no SILICONFLOW_API_KEY line in .env.example"
+    value = lines[0].split("=", 1)[1].strip()
+    assert value == "sk-replace-me", (
+        ".env.example holds something other than the placeholder; that file is "
+        "tracked, so a real key here would be committed and pushed"
+    )
+
+
 def test_pii_is_blocked_before_calling_the_model(monkeypatch):
     def _boom(*args, **kwargs):
         raise AssertionError("model must not be called")
